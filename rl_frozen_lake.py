@@ -1,7 +1,7 @@
 import numpy as np
 import gymnasium as gym
 import matplotlib.pyplot as plt
-from typing import List
+from typing import List, Tuple
 
 
 def train_q_learing(
@@ -14,7 +14,7 @@ def train_q_learing(
     episodes: int = 20000,
     eval_every: int = 100,
     eval_episodes: int = 10,
-):
+) -> Tuple:
     """Trains an agent using the Q-learning algorithm on a specified environment.
 
     This function initializes a Q-table with random values and iteratively updates it based on the agent's experiences in the environment. The exploration rate (epsilon) decreases over time, allowing the agent to transition from exploring the environment to exploiting the learned Q-values. The function periodically evaluates the agent's performance using the current Q-table and returns the training history.
@@ -107,6 +107,112 @@ def visualize_frozen_lake(q_table, env_name="FrozenLake-v1"):
             print(f"Episode finished with a total reward of: {total_reward}")
 
 
+def visualize_frozen_lake_double(q_table_a, q_table_b, env_name="FrozenLake-v1"):
+    env = gym.make(env_name, render_mode="human")
+    state = env.reset()[0]
+    env.render()
+    done = False
+    total_reward = 0
+    while not done:
+        action = np.argmax(
+            (q_table_a[state] + q_table_b[state]) / 2
+        )  # Use the average of both Q-tables
+        state, reward, done, truncated, info = env.step(action)
+        total_reward += reward
+        env.render()
+        print(f"Action: {action}, State: {state}, Reward: {reward}")
+        if done:
+            print(f"Episode finished with a total reward of: {total_reward}")
+
+
+def train_double_q_learning(
+    env: gym.Env,
+    alpha: float = 0.1,
+    gamma: float = 0.99,
+    initial_epsilon: float = 1.0,
+    min_epsilon: float = 0.1,
+    epsilon_decay: float = 0.99999975,
+    episodes: int = 20000,
+    eval_every: int = 100,
+    eval_episodes: int = 10,
+) -> Tuple[np.ndarray, np.ndarray, List[float], List[int]]:
+    """
+    Trains an agent using the Double Q-learning algorithm on a specified environment.
+
+    Args:
+        env (gym.Env): The environment to train the agent on.
+        alpha (float): Learning rate.
+        gamma (float): Discount factor for future rewards.
+        initial_epsilon (float): Starting value for epsilon in the epsilon-greedy strategy.
+        min_epsilon (float): Minimum value that epsilon can decay to over time.
+        epsilon_decay (float): Rate at which epsilon decays after each episode.
+        episodes (int): Total number of training episodes.
+        eval_every (int): Frequency of evaluation phases during training.
+        eval_episodes (int): Number of episodes to run during each evaluation phase.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, List[float], List[int]]: A tuple containing:
+            - The final Q-table A learned by the agent.
+            - The final Q-table B learned by the agent.
+            - A history of average rewards obtained during evaluation periods.
+            - A history of average step lengths taken during evaluation periods.
+    """
+    n_states = env.observation_space.n
+    n_actions = env.action_space.n
+    q_table_a = np.random.uniform(low=0, high=0.1, size=(n_states, n_actions))
+    q_table_b = np.random.uniform(low=0, high=0.1, size=(n_states, n_actions))
+    q_table_a[
+        (env.desc == b"G").flatten()
+    ] = 0  # Assuming 'G' is the goal/terminal state
+    q_table_b[
+        (env.desc == b"G").flatten()
+    ] = 0  # Assuming 'G' is the goal/terminal state
+
+    epsilon = initial_epsilon
+    rewards, lengths = [], []
+
+    for episode in range(episodes):
+        state = env.reset()[0]
+        done = False
+        truncated = False
+        total_reward, steps = 0, 0
+
+        while not (done or truncated):
+            if np.random.uniform(0, 1) < epsilon:
+                action = env.action_space.sample()
+            else:
+                action = np.argmax(q_table_a[state, :] + q_table_b[state, :])
+
+            next_state, reward, done, truncated, info = env.step(action)
+            if np.random.rand() < 0.5:
+                best_next_action = np.argmax(q_table_a[next_state, :])
+                td_target = reward + gamma * q_table_b[next_state, best_next_action]
+                q_table_a[state, action] += alpha * (
+                    td_target - q_table_a[state, action]
+                )
+            else:
+                best_next_action = np.argmax(q_table_b[next_state, :])
+                td_target = reward + gamma * q_table_a[next_state, best_next_action]
+                q_table_b[state, action] += alpha * (
+                    td_target - q_table_b[state, action]
+                )
+
+            total_reward += reward
+            steps += 1
+
+        epsilon = max(min_epsilon, epsilon_decay * epsilon)
+
+        if (episode + 1) % eval_every == 0:
+            avg_reward, avg_length = evaluate_policy(
+                env, q_table_a + q_table_b, eval_episodes
+            )
+            rewards.append(avg_reward)
+            lengths.append(avg_length)
+
+    print("Double Q-learning training completed.")
+    return q_table_a, q_table_b, rewards, lengths
+
+
 def evaluate_policy(env, q_table, episodes=10):
     """Evaluate the Q-learning agent for a certain number of episodes and return average reward and steps."""
     total_reward, total_length = 0, 0
@@ -153,12 +259,17 @@ if __name__ == "__main__":
     env = gym.make("FrozenLake-v1", is_slippery=True)
 
     # Train the agent
-    q_table, rewards, lengths = train_q_learing(env)
+    # q_table, rewards, lengths = train_q_learing(env)
+
+    q_table_a, q_table_b, rewards, lengths = train_double_q_learning(env)
 
     _plot_evaluation(rewards, lengths)
 
     # Display the trained Q-table
     print("Trained Q-Table:")
-    print(q_table)
+    print(q_table_a)
+    print("Trained Q-Table:")
+    print(q_table_b)
 
-    visualize_frozen_lake(q_table)
+    visualize_frozen_lake_double(q_table_a, q_table_b)
+    # visualize_frozen_lake(q_table)
