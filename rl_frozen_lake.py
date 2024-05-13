@@ -13,7 +13,7 @@ def train_q_learing(
     epsilon_decay: float = 0.995,
     episodes: int = 20000,
     eval_every: int = 100,
-    eval_episodes: int = 10,
+    eval_episodes: int = 20,
 ) -> Tuple:
     """Trains an agent using the Q-learning algorithm on a specified environment.
 
@@ -42,7 +42,7 @@ def train_q_learing(
     n_actions = env.action_space.n
     q_table = np.random.uniform(low=-0.1, high=0.1, size=(n_states, n_actions))
     q_table[(env.desc == b"G").flatten()] = 0  # Assuming 'G' is the goal/terminal state
-
+    env.reset(seed=1234)
     epsilon = initial_epsilon
     rewards, lengths = [], []
 
@@ -94,7 +94,7 @@ def train_double_q_learning(
     epsilon_decay: float = 0.995,
     episodes: int = 20000,
     eval_every: int = 100,
-    eval_episodes: int = 10,
+    eval_episodes: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray, List[float], List[int]]:
     """
     Trains an agent using the Double Q-learning algorithm on a specified environment.
@@ -130,14 +130,17 @@ def train_double_q_learning(
 
     epsilon = initial_epsilon
     rewards, lengths = [], []
+    env.reset(seed=1234)
+    max_steps = 99
 
     for episode in range(episodes):
         state = env.reset()[0]
         done = False
         truncated = False
         total_reward, steps = 0, 0
+        broke = False
 
-        while not (done or truncated):
+        for step in range(max_steps):
             if np.random.uniform(0, 1) < epsilon:
                 action = env.action_space.sample()
             else:
@@ -160,7 +163,9 @@ def train_double_q_learning(
             total_reward += reward
             steps += 1
             state = next_state
-
+            # If done (if we're dead) : finish episode
+            if done:
+                break
         epsilon = max(min_epsilon, epsilon_decay * epsilon)
 
         if (episode + 1) % eval_every == 0:
@@ -253,20 +258,97 @@ def train_speedy_q_learning(
     return q_table, rewards, lengths
 
 
+def initialize_q_tables(state_space, action_space):
+    """Initialize Q-tables Q_0 and Q_{-1}."""
+    Q_0 = np.zeros((state_space, action_space))
+    Q_minus_1 = np.copy(Q_0)  # Initially, Q_{-1} is the same as Q_0
+    return Q_0, Q_minus_1
+
+def epsilon_greedy_policy(Q, state, epsilon):
+    """Choose an action based on epsilon-greedy policy."""
+    if np.random.random() < epsilon:
+        return np.random.randint(Q.shape[1])
+    else:
+        return np.argmax(Q[state])
+
+def asynchronous_speedy_q_learning(
+        env, alpha=0.1, epsilon=1.0, gamma=0.99, total_time_steps=10000,
+        eval_every: int = 100,
+        eval_episodes: int = 10
+):
+    state_space = env.observation_space.n
+    action_space = env.action_space.n
+
+    # Initialize Q-tables and state visit counts
+    Q_k, Q_k_minus_1 = initialize_q_tables(state_space, action_space)
+    k = 0  # Iteration counter
+    N = np.zeros((state_space, action_space), dtype=int)
+    state = env.reset()[0]
+    t = 0
+    rewards, lengths = [], []
+    total_reward, steps = 0, 0
+    while t < total_time_steps - 1:
+        action = epsilon_greedy_policy(Q_k, state, epsilon)
+        next_state, reward, done, truncated, info = env.step(action)
+        # Update visit count
+
+        N[state][action] += 1
+        eta = 1 / N[state][action]
+
+        # Compute temporal differences
+        best_next_action_k_minus_1 = np.argmax(Q_k_minus_1[next_state])
+        best_next_action_k = np.argmax(Q_k[next_state])
+        T_kQ_k_minus_1 = (1 - eta) * Q_k_minus_1[state, action] + eta * (reward + gamma * Q_k_minus_1[next_state, best_next_action_k_minus_1])
+        T_kQ_k = (1 - eta) * Q_k[state, action] + eta * (reward + gamma * Q_k[next_state, best_next_action_k])
+
+        # Update Q_k+1
+        Q_k_plus_1 = (1 - alpha) * Q_k[state, action] + alpha * (k * T_kQ_k - (k-1) * T_kQ_k_minus_1)
+
+        # Update Q-table references
+        Q_k_minus_1 = Q_k
+        Q_k[state, action] = Q_k_plus_1
+        total_reward += reward
+        steps += 1
+        # Move to next state
+        state = next_state
+
+        # Check if all state-action pairs have been visited
+        if np.min(N) > 0:
+            k += 1
+            alpha = 1 / (k + 1)
+            N = np.zeros_like(N)  # Reset visit counts
+
+        t += 1
+
+        if done:
+            state = env.reset()[0]
+            total_reward, steps = 0, 0
+        if (t + 1) % eval_every == 0:
+            avg_reward, avg_length = evaluate_policy(env, Q_k, eval_episodes)
+            rewards.append(avg_reward)
+            lengths.append(avg_length)
+
+    return Q_k, rewards, lengths
+
+
 def evaluate_policy(env, q_table, episodes=10):
     """Evaluate the Q-learning agent for a certain number of episodes and return average reward and steps."""
     total_reward, total_length = 0, 0
 
     for _ in range(episodes):
         state = env.reset()[0]
-        done = False
+        done = truncated = False
         episode_reward, steps = 0, 0
 
-        while not done:
+        while not (done or truncated):
             action = np.argmax(q_table[state])
             state, reward, done, truncated, info = env.step(action)
             episode_reward += reward
             steps += 1
+            if steps >200:
+                episode_reward = 0
+                print("eval break")
+                break
 
         total_reward += episode_reward
         total_length += steps
@@ -317,7 +399,7 @@ def visualize_frozen_lake(q_table, env_name="FrozenLake-v1"):
 
 
 def visualize_frozen_lake_double(q_table_a, q_table_b, env_name="FrozenLake-v1"):
-    env = gym.make(env_name, render_mode="human")
+    env = gym.make(env_name, render_mode="human", is_slippery=False)
     state = env.reset()[0]
     env.render()
     done = False
@@ -336,26 +418,28 @@ def visualize_frozen_lake_double(q_table_a, q_table_b, env_name="FrozenLake-v1")
 
 if __name__ == "__main__":
     # Create the FrozenLake environment
-    env = gym.make("FrozenLake-v1")
+    env = gym.make("FrozenLake-v1", is_slippery=False)
 
     # Train the agent using Standard Q learning
-    # q_table, rewards, lengths = train_q_learing(env)
+    # q_table, rewards, lengths = train_q_learing(env, episodes=200000, eval_episodes=10000, eval_every=10000)
     # _plot_evaluation(rewards, lengths)
+    # print(q_table)
     # visualize_frozen_lake(q_table)
 
     # Train the agent using Double Q learning
-    # q_table_a, q_table_b, rewards, lengths = train_double_q_learning(env)
+    # q_table_a, q_table_b, rewards, lengths = train_double_q_learning(env, episodes=10000, eval_episodes=1000, eval_every=1000)
     # _plot_evaluation(rewards, lengths)
-    # visualize_frozen_lake_double(q_table_a, q_table_b)
+    # print(q_table_a)
+    # # visualize_frozen_lake_double(q_table_a, q_table_b)
     # print("Trained Q-Table:")
     # print(q_table_a)
     # print("Trained Q-Table:")
     # print(q_table_b)
 
     # Train the agent using Speedy Q Learning
-    q_table, rewards, lengths = train_speedy_q_learning(env)
+    q_table, rewards, lengths = asynchronous_speedy_q_learning(env, total_time_steps=2000, eval_episodes=200, eval_every=200)
     _plot_evaluation(rewards, lengths)
-    visualize_frozen_lake(q_table)
+    # # visualize_frozen_lake(q_table)
     print("Trained Q-Table:")
     print(q_table)
 
